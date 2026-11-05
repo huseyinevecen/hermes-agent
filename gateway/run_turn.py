@@ -2302,22 +2302,12 @@ class GatewayTurnMixin:
         with self._profile_scope_for_source(source):
             return self._format_session_info(source)
 
-    def _format_session_info(self, source: Optional["SessionSource"] = None) -> str:
-        """Model / provider / context-length / endpoint block so users can spot bad context detection.
-
-        When ``source`` is given, apply the same ``channel_overrides`` the turn path uses so /new
-        and auto-reset banners advertise the model/provider the session actually runs — including
-        that override provider's runtime endpoint/credentials for context probing.
-        """
-        from gateway.run import (
-            _get_channel_override,
-            _resolve_gateway_model_context,
-            _resolve_runtime_agent_kwargs_for_provider,
-        )
+    def _session_route_for_source(self, source):
+        """Read-only channel route for display callers; provider failures discard the whole route."""
+        from gateway.run import _get_channel_override, _resolve_runtime_agent_kwargs_for_provider
 
         model = None
         route = None
-        force_provider = None
         cfg = getattr(self, "config", None)
         if source is not None and cfg is not None:
             try:
@@ -2347,14 +2337,25 @@ class GatewayTurnMixin:
                             if not model and runtime.get("model"):
                                 model = runtime["model"]
                         except Exception:
-                            # No-credential fallback: keep override provider; leave global endpoint alone.
-                            force_provider = ch.provider
+                            # Fall back model and provider together; never advertise a mixed route.
+                            return None, None
             except Exception:
-                pass
+                logger.debug("Channel display route lookup failed", exc_info=True)
+                return None, None
 
+        return model, route
+
+    def _format_session_info(self, source: Optional["SessionSource"] = None) -> str:
+        """Model / provider / context-length / endpoint block so users can spot bad context detection.
+
+        When ``source`` is given, apply the same ``channel_overrides`` the turn path uses so /new
+        and auto-reset banners advertise the model/provider the session actually runs — including
+        that override provider's runtime endpoint/credentials for context probing.
+        """
+        from gateway.run import _resolve_gateway_model_context
+
+        model, route = self._session_route_for_source(source)
         resolved = _resolve_gateway_model_context(model=model, route=route)
-        if force_provider:
-            resolved = dataclasses.replace(resolved, provider=force_provider)
         context_length = resolved.context_length
         ctx_source = {
             "config": "config",

@@ -197,7 +197,7 @@ class TestChannelOverrideSessionInfo:
         assert "base-model" in info
         assert "override-model" not in info
 
-    def test_override_provider_survives_runtime_failure(self, runner, tmp_path):
+    def test_override_failure_falls_back_model_and_provider_together(self, runner, tmp_path):
         self._runner_with_override(runner, model="override-model", provider="anthropic")
         p1, p2, p3 = _patch_info(
             tmp_path, "model:\n  default: base-model\n  context_length: 4096\n",
@@ -207,8 +207,10 @@ class TestChannelOverrideSessionInfo:
             side_effect=RuntimeError("no creds"),
         ):
             info = runner._format_session_info(self._source())
-        assert "override-model" in info
-        assert "anthropic" in info
+        assert "base-model" in info
+        assert "openrouter" in info
+        assert "override-model" not in info
+        assert "anthropic" not in info
 
     def test_reset_notice_helper_uses_channel_override(self, runner, tmp_path):
         """Production path: _reset_notice_session_info(source) must pass source through."""
