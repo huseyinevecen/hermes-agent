@@ -90,11 +90,12 @@ def _quiet_sync(call, default=None):
 
 
 def _status_model_route(
-    status_agent, active_override: dict, persisted_route: dict, session_row: dict, session_entry
+    status_agent, active_override: dict, persisted_route: dict, session_row: dict, session_entry,
+    *, channel_route: dict | None = None,
 ):
     """``(model, provider, context_used, context_total, route)`` for /status.
 
-    Order: live/cached agent route -> active session override -> persisted recent route ->
+    Order: live/cached agent route -> active session override -> persisted recent route -> channel route ->
     SessionDB row -> gateway config (only loaded when something is still missing). ``route`` carries
     the ``provider`` / ``base_url`` / ``api_key`` of the winning source only, so a later context-window
     lookup queries the endpoint that serves the displayed model (never a losing route's endpoint);
@@ -118,6 +119,9 @@ def _status_model_route(
                     "api_key": _clean_str(active_override.get("api_key"))}))
     routes.append((_clean_str(persisted_route.get("model")),
                    _clean_str(persisted_route.get("billing_provider")), {}))
+    if channel_route:
+        routes.append((_clean_str(channel_route.get("model")),
+                       _clean_str(channel_route.get("provider")), channel_route))
     row_route = (_clean_str(session_row.get("model")), _clean_str(session_row.get("billing_provider")), {})
     # First fully-resolved (model AND provider) route wins; the SessionDB row is used even if partial.
     model_name, provider_name, route = next((r for r in routes if r[0] and r[1]), row_route)
@@ -255,8 +259,10 @@ class GatewayStatusCommandsMixin:
         status_agent = agent if is_running else self._cached_agent_for(session_key)
         self._rehydrate_session_model_override(session_key)
         active_override = self._session_model_override(session_key) or {}
+        channel_model, channel_route = await self._resolve_display_route(source)
         model_name, provider_name, context_used, context_total, route = _status_model_route(
-            status_agent, active_override, persisted_route, session_row, session_entry
+            status_agent, active_override, persisted_route, session_row, session_entry,
+            channel_route={"model": channel_model, **channel_route} if channel_model else None,
         )
         if not context_total and model_name:
             # Same resolver /context uses (off-loop: it can probe /models). A window the resolver only
@@ -401,7 +407,7 @@ class GatewayStatusCommandsMixin:
 
     async def _resolve_context_figures(self, agent, ctx, session_entry, source):
         """``(used, context_length, model_name)`` for /context: used = compressor -> SessionStore;
-        model = agent -> SessionDB row; window = compressor -> gateway model route -> model metadata."""
+        model = agent -> SessionDB row -> channel route; window = compressor -> gateway model route -> model metadata."""
         used = max(0, _n(ctx, "last_prompt_tokens")) or max(0, _int_value(getattr(session_entry, "last_prompt_tokens", 0)))
         context_length = _n(ctx, "context_length")
         model_name = _clean_str(getattr(agent, "model", "")) if agent is not None else ""
@@ -409,7 +415,10 @@ class GatewayStatusCommandsMixin:
             row = await _quiet(lambda: self._session_db.get_session(session_entry.session_id))
             model_name = _clean_str(row.get("model", "")) if isinstance(row, dict) else ""
         if not context_length:
-            resolved = await self._resolve_route_context(source, model_name)
+            route = None
+            if not model_name:
+                model_name, route = await self._resolve_display_route(source)
+            resolved = await self._resolve_route_context(source, model_name, route)
             if resolved is not None:
                 model_name = model_name or resolved.model
                 context_length = _int_value(resolved.context_length)
@@ -419,6 +428,22 @@ class GatewayStatusCommandsMixin:
                 await _quiet(lambda: asyncio.to_thread(get_model_context_length, model_name))
             )
         return used, context_length, model_name
+
+    async def _resolve_display_route(self, source):
+        """Resolve the channel display route off-loop in its owning profile, without turn state."""
+        from gateway.run import _resolve_gateway_model, _resolve_runtime_agent_kwargs
+
+        def _resolve():
+            with self._profile_scope_for_source(source):
+                model, route = self._session_route_for_source(source)
+                if model is None and route is None:
+                    return None, {}
+                if route is None:
+                    runtime = _resolve_runtime_agent_kwargs()
+                    route = {k: runtime.get(k) for k in ("provider", "base_url", "api_key")}
+                    route["_runtime_resolved"] = True
+                return model or _resolve_gateway_model(), route
+        return await _quiet(lambda: asyncio.to_thread(_resolve), (None, {}))
 
     async def _resolve_route_context(self, source, model_name: str, route: dict | None = None):
         """``_resolve_gateway_model_context`` for a non-resident session, run off the event loop inside

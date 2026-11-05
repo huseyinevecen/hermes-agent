@@ -547,6 +547,10 @@ class GatewayModelCommandsMixin:
         ctx.read_config()
         ctx.apply_override(self._session_model_overrides.get(session_key, {}))
         if not request.target and not request.explicit_provider:
+            display_model, display_route = await self._resolve_display_route(source)
+            if display_model:
+                ctx.apply_override({"model": display_model, **display_route})
+                ctx.apply_override(self._session_model_overrides.get(session_key, {}))
             return await self._model_listing_reply(event, ctx, profile_home)
         result, error = await self._perform_model_switch(ctx, request.target, request.explicit_provider, source)
         if error is not None:
